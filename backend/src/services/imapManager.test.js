@@ -185,6 +185,8 @@ describe('providerProfile — host detection', () => {
     expect(providerProfile(account(host)).pushesFlags).toBe(false);
     expect(providerProfile(account(host)).speculativeFetch).toBe(false);
     expect(providerProfile(account(host)).snippetIndex).toBe(false);
+    expect(providerProfile(account(host)).bodyIndex).toBe(true);
+    expect(providerProfile(account(host)).prefetchNewBodiesLimit).toBe(5);
     // secondaryOverPool is a session-limited-provider knob, not a global flip.
     expect(providerProfile(account(host)).secondaryOverPool).toBeUndefined();
   });
