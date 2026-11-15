@@ -371,6 +371,20 @@ describe('makeClientCfg — broken-IMAP4rev2 opt-out (#472)', () => {
   });
 });
 
+describe('makeClientCfg — no COMPRESS for Gmail', () => {
+  // A throttled Gmail account answers each command after ~10s; with COMPRESS the handshake
+  // outlasted the 30s connect deadline and the account never connected again.
+  it('skips COMPRESS on every Gmail connection, and only there', () => {
+    const gmail = { ...baseAccount, imap_host: 'imap.gmail.com' };
+    expect(makeClientCfg(gmail, resolved, { enableIdle: true }).disableCompression).toBe(true);
+    expect(makeClientCfg(gmail, resolved, { enableIdle: false }).disableCompression).toBe(true);
+    for (const host of ['imap.example.com', 'outlook.office365.com', 'imap.purelymail.com', 'imap.strato.de']) {
+      const acct = { ...baseAccount, imap_host: host };
+      expect(makeClientCfg(acct, resolved, { enableIdle: false }).disableCompression).toBeUndefined();
+    }
+  });
+});
+
 describe('makeClientCfg — auto-IDLE arming', () => {
   it('arms IDLE strictly faster than the fastest possible sync tick', () => {
     // The invariant. If this fails, IDLE cannot start before the next tick interrupts it.
