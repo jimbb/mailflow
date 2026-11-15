@@ -429,6 +429,79 @@ export function planIntegrityFlagScan({ condstore, storedModseq, serverModseq, e
 // Body parts that cover ~99% of real-world email structures (used for full body caching)
 const BODY_PREFETCH_PARTS = ['1', '1.1', '1.2', '2', '2.1', '2.2', '1.1.1', '1.2.1'];
 
+// Rows the historical body indexer still has to fill. Only recent mail: new arrivals are cached
+// as they come in, and the whole history (half a million Gmail messages, several GB) does not
+// fit the Postgres disk on a small host. Older bodies are fetched when opened, as before.
+// ponytail: fixed 90-day window; widen it once Postgres sits on a disk with room for every body.
+export const BODY_INDEX_PENDING =
+  "body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL AND date > NOW() - INTERVAL '90 days'";
+
+// The part numbers a message's BODYSTRUCTURE lists. imapflow numbers a multipart's children
+// "1", "2", "1.1" and so on; a single-part message carries no number in the tree, and its
+// body is part 1.
+export function structureParts(structure) {
+  const parts = new Set();
+  const walk = (node) => {
+    if (!node) return;
+    if (node.part) parts.add(node.part);
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(structure);
+  if (!parts.size) parts.add('1');
+  return parts;
+}
+
+// The server answered the command with NO or BAD: it refused it, and the connection is fine.
+const isServerRejection = (err) => err?.responseStatus === 'NO' || err?.responseStatus === 'BAD';
+
+// Fetches one snippet-indexer batch, handing each message to onMessage.
+//
+// The one-round-trip form asks every message for the same guessed parts. Servers return
+// nothing for a part a message lacks, except Proton Mail Bridge, which fails the whole FETCH
+// with "no such parts exists" (#768), so the same batch was retried forever. On that refusal,
+// and from the start when structureFirst is set, this reads each message's structure and asks
+// only for the parts it has, one FETCH per distinct set of parts. Anything the server still
+// refuses is skipped: those messages get no snippet and are marked attempted like any other,
+// so a batch can never repeat. A broken connection still throws.
+//
+// Returns true when the guessed form was refused, so the caller can skip it from then on.
+export async function fetchSnippetBatch(client, uids, onMessage, { structureFirst = false } = {}) {
+  const items = { uid: true, envelope: true, bodyStructure: true };
+  if (!structureFirst) {
+    try {
+      for await (const msg of client.fetch(uids.join(','), { ...items, bodyParts: BODY_PREFETCH_PARTS }, { uid: true })) {
+        await onMessage(msg);
+      }
+      return false;
+    } catch (err) {
+      if (!isServerRejection(err)) throw err;
+    }
+  }
+  const groups = new Map();
+  try {
+    for await (const msg of client.fetch(uids.join(','), { uid: true, bodyStructure: true }, { uid: true })) {
+      const have = structureParts(msg.bodyStructure);
+      const parts = BODY_PREFETCH_PARTS.filter((part) => have.has(part));
+      const key = parts.join(' ');
+      if (!groups.has(key)) groups.set(key, { parts, uids: [] });
+      groups.get(key).uids.push(msg.uid);
+    }
+  } catch (err) {
+    if (!isServerRejection(err)) throw err;
+    return !structureFirst;
+  }
+  for (const { parts, uids: group } of groups.values()) {
+    try {
+      for await (const msg of client.fetch(group.join(','), { ...items, bodyParts: parts }, { uid: true })) {
+        await onMessage(msg);
+      }
+    } catch (err) {
+      if (!isServerRejection(err)) throw err;
+    }
+  }
+  return !structureFirst;
+}
+
 // Every cid: reference receives a full copy of its image, so a small message pointing at one
 // inline part thousands of times would build a body of hundreds of MB. The first reference to
 // each image is always embedded; repeats share this many characters of data: URI per message,
@@ -1441,6 +1514,11 @@ export const PROVIDERS = {
     // Backfills 30k+ messages in ~2 min instead of 12+ hours.
     batchSize: 500, batchDelay: 2000, errorDelay: 30000, batchesPerConn: 10,
     fetchBody: false,
+    // A throttled Gmail account answers every command after ~10s ("OK Success [THROTTLED]"),
+    // for hours. NAMESPACE, COMPRESS and ENABLE after the login then took ~32s, past the 30s
+    // connect deadline, so the account could never connect and its mail stopped. Without
+    // COMPRESS the handshake takes ~21s and the account still syncs, slowly.
+    disableCompression: true,
     // New arrivals use the separate body-prefetch path so live sync stays envelope-only
     // while the newest mail is still cached immediately.
     bodyIndex: true,
@@ -2107,6 +2185,7 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
   // UID SEARCH ALL with an empty ESEARCH once IMAP4rev2 is enabled). Profile-driven so
   // every connection kind — persistent, pool, backfill, probe — behaves identically.
   if (providerProfile(account).disableIMAP4rev2) cfg.disableIMAP4rev2 = true;
+  if (providerProfile(account).disableCompression) cfg.disableCompression = true;
   // Auto-IDLE: ImapFlow re-enters IDLE automatically between commands so the
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
@@ -2891,6 +2970,7 @@ export class ImapManager {
     this._pollOnlyAccounts = new Set(); // accountId — demoted to poll-only (no persistent IDLE) by the per-host connection budget (#379)
     this._idleMissStreak = new Map(); // accountId -> consecutive health checks seen NOT idling despite IDLE being enabled
     this.snippetIndexerRunning = new Set(); // accountId — prevent duplicate snippet-index runs
+    this.snippetStructureFirst = new Set(); // accountId: the server refuses guessed body parts (Proton Mail Bridge, #768)
     this.snippetBackoff = new Map();        // imap_host -> { failures, until } circuit breaker (host-level: a per-host connection limit hits every account on that host, so back them all off together)
     this.lastUserActivity = new Map();      // accountId -> ms timestamp of last live body fetch
     this.syncTickCount = new Map(); // accountId -> successful sync ticks (for reconcile scheduling)
@@ -2995,7 +3075,7 @@ export class ImapManager {
           const profile = providerProfile(acct.rows[0]);
           const backlog = await query(
             profile.bodyIndex
-              ? "SELECT 1 FROM messages WHERE account_id = $1 AND body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL LIMIT 1"
+              ? `SELECT 1 FROM messages WHERE account_id = $1 AND ${BODY_INDEX_PENDING} LIMIT 1`
               : "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL LIMIT 1",
             [accountId]
           );
@@ -6256,7 +6336,7 @@ export class ImapManager {
     const batchDelay = bodyIndex ? Math.max(cfg.batchDelay, 5000) : Math.max(cfg.batchDelay, 2000);
     const MAX_BATCHES_PER_RUN = bodyIndex ? 100 : 200;
     const needsContent = bodyIndex
-      ? 'body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL'
+      ? BODY_INDEX_PENDING
       : "(snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL";
     const label = bodyIndex ? 'Body indexer' : 'Snippet indexer';
 
@@ -6340,10 +6420,7 @@ export class ImapManager {
           try {
             const lock = await siClient.getMailboxLock(folder);
             try {
-              for await (const msg of siClient.fetch(uids.join(','), {
-                uid: true, envelope: true, bodyStructure: true,
-                bodyParts: BODY_PREFETCH_PARTS,
-              }, { uid: true })) {
+              const refused = await fetchSnippetBatch(siClient, uids, async (msg) => {
                 try {
                   const parsed = await parseMessage(msg);
                   if (bodyIndex) {
@@ -6377,6 +6454,10 @@ export class ImapManager {
                     );
                   }
                 } catch { /* skip snippet on parse/update failure */ }
+              }, { structureFirst: this.snippetStructureFirst.has(account.id) });
+              if (refused) {
+                this.snippetStructureFirst.add(account.id);
+                console.log(`Snippet indexer: ${logAccount(account)} refuses guessed body parts; reading each message's structure first from now on`);
               }
             } finally {
               lock.release();
@@ -8583,7 +8664,7 @@ export class ImapManager {
   // A socket is authenticated once, at upgrade, so ending its session does not stop the
   // broadcasts above reaching it. The userId guard matters: a socket still authenticating
   // has no userId either, and would match a missing one. The close waits a turn: an upgrade
-  // whose session lookup was answered in the same read from Redis as the write that ended
+  // whose session lookup was answered in the same read from the store as the write that ended
   // the session authenticates a microtask after that write's callback, and would be missed.
   closeSockets(userId, { sessionId = null, exceptSessionId = null, reason = 'Unauthorized' } = {}) {
     if (!userId) return;
