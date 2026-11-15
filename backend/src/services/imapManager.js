@@ -429,6 +429,13 @@ export function planIntegrityFlagScan({ condstore, storedModseq, serverModseq, e
 // Body parts that cover ~99% of real-world email structures (used for full body caching)
 const BODY_PREFETCH_PARTS = ['1', '1.1', '1.2', '2', '2.1', '2.2', '1.1.1', '1.2.1'];
 
+// Rows the historical body indexer still has to fill. Only recent mail: new arrivals are cached
+// as they come in, and the whole history (half a million Gmail messages, several GB) does not
+// fit the Postgres disk on a small host. Older bodies are fetched when opened, as before.
+// ponytail: fixed 90-day window; widen it once Postgres sits on a disk with room for every body.
+export const BODY_INDEX_PENDING =
+  "body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL AND date > NOW() - INTERVAL '90 days'";
+
 // The part numbers a message's BODYSTRUCTURE lists. imapflow numbers a multipart's children
 // "1", "2", "1.1" and so on; a single-part message carries no number in the tree, and its
 // body is part 1.
@@ -3062,7 +3069,7 @@ export class ImapManager {
           const profile = providerProfile(acct.rows[0]);
           const backlog = await query(
             profile.bodyIndex
-              ? "SELECT 1 FROM messages WHERE account_id = $1 AND body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL LIMIT 1"
+              ? `SELECT 1 FROM messages WHERE account_id = $1 AND ${BODY_INDEX_PENDING} LIMIT 1`
               : "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL LIMIT 1",
             [accountId]
           );
@@ -6323,7 +6330,7 @@ export class ImapManager {
     const batchDelay = bodyIndex ? Math.max(cfg.batchDelay, 5000) : Math.max(cfg.batchDelay, 2000);
     const MAX_BATCHES_PER_RUN = bodyIndex ? 100 : 200;
     const needsContent = bodyIndex
-      ? 'body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL'
+      ? BODY_INDEX_PENDING
       : "(snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL";
     const label = bodyIndex ? 'Body indexer' : 'Snippet indexer';
 
