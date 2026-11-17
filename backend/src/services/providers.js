@@ -19,6 +19,9 @@
 //                      Disabled for providers that throttle body fetches too aggressively.
 // skipFolderPatterns:  folder path substrings to skip during backfill (label-view dedup).
 // skipFolderNames:     exact folder paths to skip (non-selectable namespace containers).
+// maxSessions:         concurrent sessions per mailbox, for a provider that refuses more
+//                      (see otherSessionLimit). Pair it with secondaryOverPool, so probes
+//                      reuse the pooled session rather than wait for a slot.
 // batchSize/Delay/errorDelay/batchesPerConn: backfill rate-limit tuning.
 // connectStaggerMs:     base gap between successive account connects at startup, to keep the
 //                       initial burst under a provider's per-IP connection rate limit.
@@ -105,6 +108,20 @@ export const PROVIDERS = {
     speculativeFetch: true,
     skipFolderPatterns: [],
     skipFolderNames: [],
+    // Outlook.com and Exchange Online limit concurrent IMAP sessions per mailbox, about 15
+    // shared by every client the user runs, and count a dead session until it times out.
+    // Past the limit a login succeeds and the next command answers "User is authenticated
+    // but not connected.", while sessions already open keep working. On 2026-11-16 a
+    // hotmail.com account had every second session refused while MailFlow held only its
+    // IDLE one, so no message could be opened. MailFlow used to open its IDLE session, a
+    // pool of four and a fresh login per background job. So: three sessions at most (IDLE,
+    // one pooled, one for background jobs), the Yahoo recipe for the rest (no pre-warm;
+    // folder status and the staleness probe reuse the pooled session), and an opened
+    // message is read over the IDLE session when no other one is free (fetchMessageBody).
+    maxSessions: 3,
+    poolSize: 1,
+    poolPrewarm: false,
+    secondaryOverPool: true,
   },
   purelymail: {
     // PurelyMail (Dovecot-based) is connection-sensitive, but it runs IMAP IDLE reliably —
