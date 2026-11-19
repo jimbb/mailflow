@@ -86,8 +86,12 @@ describe('per-mailbox session cap', () => {
     expect(profile.maxSessions).toBe(3);
     expect(profile.poolSize).toBe(1);
     expect(otherSessionLimit(profile)).toBe(1);
+    // Gmail: six of its fifteen sessions, three of them for background jobs.
+    const gmail = providerProfile({ imap_host: 'imap.gmail.com' });
+    expect([gmail.maxSessions, gmail.poolSize, gmail.secondaryOverPool]).toEqual([6, 2, true]);
+    expect(otherSessionLimit(gmail)).toBe(3);
     // Every other provider stays uncapped.
-    for (const host of ['imap.gmail.com', 'imap.mail.yahoo.com', 'imap.purelymail.com', 'imap.zoho.com', 'imap.example.com']) {
+    for (const host of ['imap.mail.yahoo.com', 'imap.purelymail.com', 'imap.zoho.com', 'imap.example.com']) {
       expect(otherSessionLimit(providerProfile({ imap_host: host }))).toBe(Infinity);
     }
   });
@@ -163,8 +167,8 @@ describe('per-mailbox session cap', () => {
     const a = outlook();
     const b = outlook();
     const held = [await connectImapClient(a, resolved, cfg, 30000, 'Backfill connect'), await connectImapClient(b, resolved, cfg, 30000, 'Backfill connect')];
-    const gmail = mailbox('imap.gmail.com');
-    for (let i = 0; i < 4; i++) held.push(await connectImapClient(gmail, resolved, cfg, 30000, 'Backfill connect'));
+    const uncapped = mailbox('imap.example.com');
+    for (let i = 0; i < 4; i++) held.push(await connectImapClient(uncapped, resolved, cfg, 30000, 'Backfill connect'));
     expect(ImapFlow).toHaveBeenCalledTimes(6);
     for (const c of held) c.close();
   });
@@ -294,7 +298,7 @@ describe('which session serves an opened message', () => {
   });
 
   it('leaves an uncapped provider on the pool while nothing refuses it', async () => {
-    const account = withIdleSession(mailbox('imap.gmail.com'));
+    const account = withIdleSession(mailbox('imap.example.com'));
     await mgr.fetchMessageBody(account, 42, 'INBOX');
     expect(idle.fetch).not.toHaveBeenCalled();
     expect(ImapFlow).toHaveBeenCalledTimes(1);
