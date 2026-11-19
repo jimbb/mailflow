@@ -12,6 +12,7 @@ import LockScreen from './components/LockScreen.jsx';
 export default function App() {
   const { user, setUser, loadPreferences, isLocked, setLocked, lockScreen } = useStore();
   const [checking, setChecking] = useState(true);
+  const [accountsPreloaded, setAccountsPreloaded] = useState(false);
 
   // Register service worker on first mount — independent of auth state.
   // The SW itself does nothing until the user explicitly grants push permission.
@@ -24,7 +25,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const onExpired = () => { setUser(null); setLocked(false); };
+    const onExpired = () => { setUser(null); setLocked(false); setAccountsPreloaded(false); };
     const onLocked = () => setLocked(true);
     window.addEventListener('mailflow:session_expired', onExpired);
     window.addEventListener('mailflow:locked', onLocked);
@@ -83,9 +84,19 @@ export default function App() {
           lockScreen();
           return;
         }
-        // Load server preferences after confirming auth — overwrites localStorage so
-        // settings survive cache clears and stay consistent across devices.
-        await loadPreferences();
+        // Load server preferences and accounts in parallel after confirming auth so
+        // MailApp mounts with accountsReady=true and MessageList fetches immediately
+        // without waiting an extra round trip.
+        await Promise.all([
+          loadPreferences(),
+          api.getAccounts()
+            .then((accounts) => {
+              if (!Array.isArray(accounts)) return;
+              useStore.getState().setAccounts(accounts);
+              setAccountsPreloaded(true);
+            })
+            .catch(() => {}),
+        ]);
       })
       .catch((err) => {
         const params = new URLSearchParams(window.location.search);
@@ -126,7 +137,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route path="/register" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-      <Route path="/*" element={user ? (isLocked ? <LockScreen /> : <MailApp />) : <Navigate to="/login" replace />} />
+      <Route path="/*" element={user ? (isLocked ? <LockScreen /> : <MailApp accountsPreloaded={accountsPreloaded} />) : <Navigate to="/login" replace />} />
     </Routes>
   );
 }

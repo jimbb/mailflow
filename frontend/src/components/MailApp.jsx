@@ -54,7 +54,8 @@ const lazyFallback = (
 // then once a minute.
 const ACCOUNTS_RETRY_MS = [2000, 5000, 15000, 30000, 60000];
 
-export default function MailApp() {
+export default function MailApp({ accountsPreloaded = false } = {}) {
+  const accountsPreloadedRef = useRef(accountsPreloaded);
   const { t } = useTranslation();
   const {
     setAccounts, setUnreadCounts, showAdmin,
@@ -453,7 +454,9 @@ export default function MailApp() {
   useEffect(() => {
     // Load accounts. A failed load (the server restarting, a dropped connection) used to leave
     // the app with no accounts until a reload: it is tried again, sooner at first, and on a resume.
-    let accountsLoaded = false;
+    // When App.jsx preloaded accounts in parallel with preferences on boot, reuse that result once.
+    let accountsLoaded = accountsPreloadedRef.current && useStore.getState().accountsReady;
+    accountsPreloadedRef.current = false;
     let accountsRetry = null;
     let accountsAttempt = 0;
     const loadAccounts = () => {
@@ -472,13 +475,22 @@ export default function MailApp() {
           accountsRetry = setTimeout(loadAccounts, delay);
         });
     };
-    loadAccounts();
+    if (!accountsLoaded) loadAccounts();
 
     // Sync Todoist connection state — localStorage alone isn't enough across devices/sessions
     api.todoist.status().then(({ connected }) => setTodoistConnected(connected)).catch(() => {});
 
-    // Preload ComposeModal chunk so first open is instant
-    import('./ComposeModal.jsx');
+    // Defer preloading the ComposeModal chunk until idle so initial mobile inbox loading
+    // doesn't contend with downloading the rich-text editor bundle.
+    const preloadCompose = () => { import('./ComposeModal.jsx').catch(() => {}); };
+    let cancelComposePreload;
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(preloadCompose, { timeout: 3000 });
+      cancelComposePreload = () => window.cancelIdleCallback(idleId);
+    } else {
+      const timerId = setTimeout(preloadCompose, 2500);
+      cancelComposePreload = () => clearTimeout(timerId);
+    }
 
     // Load unread counts
     const refreshCounts = () => {
@@ -523,6 +535,7 @@ export default function MailApp() {
     return () => {
       clearInterval(interval);
       clearTimeout(accountsRetry);
+      cancelComposePreload();
       stopResume();
       window.removeEventListener('mailflow:counts_refresh', refreshCounts);
     };
