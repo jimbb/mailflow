@@ -257,3 +257,27 @@ describe('PATCH /auth/preferences listSort', () => {
     });
   }
 });
+
+describe('PATCH /auth/preferences threading & quick-reply toggles', () => {
+  for (const [key, paramIdx, paramIndexZero] of [
+    ['threadInboxSent', 49, 48],
+    ['threadedSearch', 50, 49],
+    ['inlineQuickReply', 51, 50],
+  ]) {
+    for (const value of [true, false]) {
+      it(`persists explicit ${key}=${value}`, async () => {
+        const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+        await patchPreferences({ session: { userId: 'user-1' }, body: { [key]: value } }, res);
+        expect(query.mock.calls[0][0]).toContain(`jsonb_build_object('${key}', $${paramIdx}::boolean)`);
+        expect(query.mock.calls[0][1][paramIndexZero]).toBe(value);
+        expect(res.json).toHaveBeenCalledWith({ ok: true });
+      });
+    }
+    it(`rejects non-boolean ${key} without querying`, async () => {
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+      await patchPreferences({ session: { userId: 'user-1' }, body: { [key]: 'yes' } }, res);
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+  }
+});

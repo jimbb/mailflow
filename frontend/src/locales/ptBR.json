@@ -362,7 +362,8 @@
       "conversationTitle": "Conversa arquivada",
       "nothingFromAccount": "Nada desta conta para arquivar nesta conversa",
       "otherAccountMessage": "Nada foi arquivado: a mensagem aberta é de outra conta",
-      "otherAccountDraft": "Nada foi arquivado: o rascunho aberto é de outra conta"
+      "otherAccountDraft": "Nada foi arquivado: o rascunho aberto é de outra conta",
+      "sentOnlyNotice": "Nada foi arquivado: esta conversa contém apenas mensagens enviadas"
     },
     "moved": {
       "title": "Mensagem movida",
@@ -1353,6 +1354,12 @@
       "threadingOnDesc": "Respostas agrupadas em conversas",
       "threadingPane": "Painel de leitura",
       "threadingPaneDesc": "A conversa inteira abre junta",
+      "threadInboxSent": "Exibir conversas enviadas na Caixa de entrada",
+      "threadInboxSentDesc": "Incluir tópicos iniciados em Enviados e suas respostas enviadas na Caixa de entrada quando o agrupamento estiver ativo",
+      "threadedSearch": "Agrupar resultados da busca em conversas",
+      "threadedSearchDesc": "Exibir os tópicos encontrados como conversas em vez de mensagens individuais",
+      "inlineQuickReply": "Resposta rápida integrada nas conversas",
+      "inlineQuickReplyDesc": "Exibir uma caixa de resposta rápida fixa dentro da conversa em vez de abrir o modal de redação",
       "composeFormat": "Formato de composição",
       "composeRichText": "Texto formatado",
       "composeRichTextDesc": "Envia HTML — suporta formatação e assinaturas estilizadas",
@@ -2424,5 +2431,11 @@
     "formNote": "Caixas do Gmail e do Google Workspace podem entrar com o Google em vez de usar uma senha de app.",
     "appPasswordNote": "O Gmail precisa de uma senha de app, não da sua senha normal. Ative a verificação em duas etapas da sua Conta do Google, crie uma senha de app e digite-a no campo de senha.",
     "createAppPassword": "Criar uma senha de app"
+  },
+  "quickReply": {
+    "regionLabel": "Resposta rápida",
+    "placeholder": "Escreva uma resposta rápida…",
+    "popOut": "Abrir no editor completo",
+    "signatureIncluded": "A assinatura será adicionada"
   }
 }

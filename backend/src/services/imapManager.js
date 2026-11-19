@@ -4732,7 +4732,7 @@ export class ImapManager {
     await this._withCountClient(account, async client => {
       // Entire operation is bounded and the finally in _withCountClient destroys a hung transport.
       try { await raceTimeout((async () => {
-        await this.syncMessages(account, client, path, 100, false, true);
+        const syncRes = await this.syncMessages(account, client, path, 100, false, true);
         const lock = await client.getMailboxLock(path);
         try {
           if (String(client.mailbox?.uidValidity) !== String(observed.uidValidity)) return;
@@ -4922,8 +4922,11 @@ export class ImapManager {
           if (gone.length) {
             await query('DELETE FROM messages WHERE account_id=$1 AND folder=$2 AND uid=ANY($3::bigint[]) AND (synced_at IS NULL OR synced_at < $4) AND EXISTS (SELECT 1 FROM folders WHERE account_id=$1 AND path=$2 AND uid_validity=$5)', [account.id, path, gone, cutoff, String(observed.uidValidity)]);
           }
-          if (changed || gone.length) {
+          const quietNewMsgs = (syncRes?.insertedCount || 0) > 0 && !syncRes?.broadcastedNewMessages;
+          if (changed || gone.length || quietNewMsgs) {
             this.broadcast({ type: 'flags_synced', accountId: account.id }, account.user_id);
+          }
+          if (changed || gone.length) {
             await emitSectionsChanged(this.pluginFacade, account, changed + gone.length);
           }
           complete = !missing;

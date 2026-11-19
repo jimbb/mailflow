@@ -364,7 +364,8 @@
       "conversationTitle": "Konwersacja zarchiwizowana",
       "nothingFromAccount": "W tej konwersacji nie ma nic z tego konta do zarchiwizowania",
       "otherAccountMessage": "Nic nie zarchiwizowano: otwarta wiadomość pochodzi z innego konta",
-      "otherAccountDraft": "Nic nie zarchiwizowano: otwarta wersja robocza pochodzi z innego konta"
+      "otherAccountDraft": "Nic nie zarchiwizowano: otwarta wersja robocza pochodzi z innego konta",
+      "sentOnlyNotice": "Nic nie zarchiwizowano: ta rozmowa zawiera wyłącznie wysłane wiadomości"
     },
     "moved": {
       "title": "Wiadomość przeniesiona",
@@ -1369,6 +1370,12 @@
       "threadingOnDesc": "Odpowiedzi grupowane w rozmowy",
       "threadingPane": "Okienko odczytu",
       "threadingPaneDesc": "Cała rozmowa otwiera się razem",
+      "threadInboxSent": "Pokazuj wysłane rozmowy w Odebranych",
+      "threadInboxSentDesc": "Uwzględniaj wątki rozpoczęte w Wysłanych i kolejne odpowiedzi na liście Odebranych przy włączonym wątkowaniu",
+      "threadedSearch": "Grupuj wyniki wyszukiwania w rozmowy",
+      "threadedSearchDesc": "Wyświetlaj pasujące wątki jako rozmowy zamiast pojedynczych wiadomości",
+      "inlineQuickReply": "Szybka odpowiedź bezpośrednio w rozmowie",
+      "inlineQuickReplyDesc": "Wyświetlaj panel szybkiej odpowiedzi u dołu rozmowy zamiast otwierać okno tworzenia",
       "composeFormat": "Format tworzenia wiadomości",
       "composeRichText": "Tekst sformatowany",
       "composeRichTextDesc": "Wysyłaj HTML — obsługuje formatowanie i sformatowane podpisy",
@@ -2443,5 +2450,11 @@
     "formNote": "Skrzynki Gmail i Google Workspace mogą logować się przez Google zamiast hasłem aplikacji.",
     "appPasswordNote": "Gmail wymaga hasła aplikacji, a nie zwykłego hasła. Włącz weryfikację dwuetapową na koncie Google, utwórz hasło aplikacji i wpisz je w polu hasła.",
     "createAppPassword": "Utwórz hasło aplikacji"
+  },
+  "quickReply": {
+    "regionLabel": "Szybka odpowiedź",
+    "placeholder": "Napisz szybką odpowiedź…",
+    "popOut": "Otwórz w pełnym edytorze",
+    "signatureIncluded": "Podpis zostanie dodany"
   }
 }

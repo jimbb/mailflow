@@ -17,7 +17,7 @@ import { fitInlineImages } from '../services/inlineImageFit.js';
 import { needsCidRefetch, needsImageRefetch, settleCids, settledEarlier, withoutCidMarker } from '../utils/cidRefs.js';
 import { sanitizeDbText, storeFetchedBody } from '../services/messageBodyStore.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
-import { draftMessageSql, trashMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings, readCopyTargets, pushSeen } from '../utils/mailUtils.js';
+import { draftMessageSql, trashMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings, readCopyTargets, pushSeen, dismissSentInboxThreads } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { listMessages, LIST_SORTS, LIST_SORT_DIRS, NOT_PLACEHOLDER_SQL } from '../services/messageService.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
@@ -182,7 +182,7 @@ function notifyMailMutation(rows, userId) {
 
 // Get messages (unified or per-account/folder)
 router.get('/messages', async (req, res) => {
-  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category, sort, dir, starredFirst } = req.query;
+  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, includeSent, category, sort, dir, starredFirst } = req.query;
 
   if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
   if (sort !== undefined && !LIST_SORTS.includes(sort)) return res.status(400).json({ error: 'Invalid sort' });
@@ -201,6 +201,7 @@ router.get('/messages', async (req, res) => {
     offset,
     unreadOnly,
     threaded,
+    includeSent,
     category: safeCategory,
     sort,
     dir,
@@ -2128,10 +2129,16 @@ router.post('/messages/bulk-archive', async (req, res) => {
     for (const [archiveFolder, entries] of Object.entries(byFolder)) {
       const allIds  = entries.map(e => e.id);
       if (allMailDestFolders.has(archiveFolder)) {
+        const deletedIdSet = new Set(allIds);
+        await dismissSentInboxThreads(owned.filter(m => deletedIdSet.has(m.id) && m.folder === 'INBOX'));
         await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [allIds]);
         continue;
       }
       const withUid = entries.filter(e => e.newUid != null);
+      if (withUid.length < entries.length) {
+        const droppedIdSet = new Set(entries.filter(e => e.newUid == null).map(e => e.id));
+        await dismissSentInboxThreads(owned.filter(m => droppedIdSet.has(m.id) && m.folder === 'INBOX'));
+      }
       await relocateRows(allIds, new Map(withUid.map(e => [e.id, e.newUid])), archiveFolder);
     }
 

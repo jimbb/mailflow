@@ -691,12 +691,22 @@ export async function patchPreferences(req, res) {
           categorizationEnabled, markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender,
-          conversationMode, hoverActionSet, autoOpenReplyDrafts, afterRemove, darkEmailBodies, listSort } = req.body;
+          conversationMode, hoverActionSet, autoOpenReplyDrafts, afterRemove, darkEmailBodies, listSort,
+          threadInboxSent, threadedSearch, inlineQuickReply } = req.body;
   if (autoOpenReplyDrafts !== undefined && typeof autoOpenReplyDrafts !== 'boolean') {
     return res.status(400).json({ error: 'autoOpenReplyDrafts must be a boolean' });
   }
   if (darkEmailBodies !== undefined && typeof darkEmailBodies !== 'boolean') {
     return res.status(400).json({ error: 'darkEmailBodies must be a boolean' });
+  }
+  if (threadInboxSent !== undefined && typeof threadInboxSent !== 'boolean') {
+    return res.status(400).json({ error: 'threadInboxSent must be a boolean' });
+  }
+  if (threadedSearch !== undefined && typeof threadedSearch !== 'boolean') {
+    return res.status(400).json({ error: 'threadedSearch must be a boolean' });
+  }
+  if (inlineQuickReply !== undefined && typeof inlineQuickReply !== 'boolean') {
+    return res.status(400).json({ error: 'inlineQuickReply must be a boolean' });
   }
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
@@ -819,6 +829,9 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $46::text IS NOT NULL THEN jsonb_build_object('afterRemove', $46::text) ELSE '{}'::jsonb END
       || CASE WHEN $47::boolean IS NOT NULL THEN jsonb_build_object('darkEmailBodies', $47::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $48::jsonb IS NOT NULL THEN jsonb_build_object('listSort', $48::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $49::boolean IS NOT NULL THEN jsonb_build_object('threadInboxSent', $49::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $50::boolean IS NOT NULL THEN jsonb_build_object('threadedSearch', $50::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $51::boolean IS NOT NULL THEN jsonb_build_object('inlineQuickReply', $51::boolean) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null, syncInterval ?? null,
@@ -830,7 +843,8 @@ export async function patchPreferences(req, res) {
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderSyncIntervalVal, folderOrderJson, senderFaviconsVal,
       showMessagePreviews ?? null, defaultSenderVal, conversationModeVal, hoverActionSetJson, autoOpenReplyDrafts ?? null,
-      afterRemoveVal, darkEmailBodies ?? null, listSortJson]);
+      afterRemoveVal, darkEmailBodies ?? null, listSortJson,
+      threadInboxSent ?? null, threadedSearch ?? null, inlineQuickReply ?? null]);
 
   if (syncInterval != null) {
     const ms = parseInt(syncInterval) * 1000;
