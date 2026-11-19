@@ -27,7 +27,7 @@ it('connects with DATABASE_URL and ignores every DB_* variable', async () => {
   const config = await poolConfigFor({ ...dbVars, DATABASE_URL: 'postgres://u:p@external:5433/mail' });
   expect(config.connectionString).toBe('postgres://u:p@external:5433/mail');
   ['host', 'port', 'database', 'user', 'password'].forEach(key => expect(config).not.toHaveProperty(key));
-  expect(config.options).toBe('-c statement_timeout=30000');
+  expect(config.options).toBe('-c statement_timeout=30000 -c jit=off');
 });
 
 it('uses the DB_* variables when DATABASE_URL is empty', async () => {

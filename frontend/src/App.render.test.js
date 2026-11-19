@@ -141,6 +141,7 @@ test('an ordinary load opens the mailbox and sends no lock', async () => {
   assert.equal(await load(meOk(false)), 'mailbox');
   assert.ok(!calls.includes('POST /api/auth/lock'), 'nothing was locked');
   assert.ok(calls.includes('GET /api/auth/preferences'), 'preferences load as usual');
+  assert.ok(calls.includes('GET /api/accounts'), 'accounts preload in parallel with preferences');
   assert.equal(localStorage.getItem('mailflow_locked'), null);
 });
 

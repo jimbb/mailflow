@@ -485,8 +485,17 @@ export default function MailApp() {
     // Sync Todoist connection state — localStorage alone isn't enough across devices/sessions
     api.todoist.status().then(({ connected }) => setTodoistConnected(connected)).catch(() => {});
 
-    // Preload ComposeModal chunk so first open is instant
-    import('./ComposeModal.jsx');
+    // Defer preloading the ComposeModal chunk until idle so initial mobile inbox loading
+    // doesn't contend with downloading the rich-text editor bundle.
+    const preloadCompose = () => { import('./ComposeModal.jsx').catch(() => {}); };
+    let cancelComposePreload;
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(preloadCompose, { timeout: 3000 });
+      cancelComposePreload = () => window.cancelIdleCallback(idleId);
+    } else {
+      const timerId = setTimeout(preloadCompose, 2500);
+      cancelComposePreload = () => clearTimeout(timerId);
+    }
 
     // Load unread counts
     const refreshCounts = () => {
@@ -535,6 +544,7 @@ export default function MailApp() {
     return () => {
       clearInterval(interval);
       clearTimeout(accountsRetry);
+      cancelComposePreload();
       stopResume();
       useStore.getState().setResumeSync('idle');
       window.removeEventListener(RESUME_RETRY_EVENT, retryResume);
