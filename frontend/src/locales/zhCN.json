@@ -362,7 +362,8 @@
       "conversationTitle": "会话已归档",
       "nothingFromAccount": "此会话中没有此账户的邮件可归档",
       "otherAccountMessage": "未归档任何邮件：打开的邮件属于其他账户",
-      "otherAccountDraft": "未归档任何邮件：打开的草稿属于其他账户"
+      "otherAccountDraft": "未归档任何邮件：打开的草稿属于其他账户",
+      "sentOnlyNotice": "未归档任何邮件：此会话仅包含已发送邮件"
     },
     "moved": {
       "title": "邮件已移动",
@@ -1427,7 +1428,13 @@
       "gravatarOff": "关闭",
       "gravatarOffDesc": "私密 — 从不联系第三方。",
       "gravatarOn": "开启",
-      "gravatarOnDesc": "从 Gravatar 获取发件人照片 — 会与第三方共享经哈希处理的发件人地址。"
+      "gravatarOnDesc": "从 Gravatar 获取发件人照片 — 会与第三方共享经哈希处理的发件人地址。",
+      "threadInboxSent": "在收件箱中显示已发送发起的会话",
+      "threadInboxSentDesc": "开启会话分组时，在收件箱列表中包含由发件箱发起的会话及您的后续回复",
+      "threadedSearch": "将搜索结果按会话分组显示",
+      "threadedSearchDesc": "开启会话分组时，将匹配的邮件按会话而不是单封邮件展示",
+      "inlineQuickReply": "在会话底部使用内嵌快速回复",
+      "inlineQuickReplyDesc": "在会话视图底部显示内嵌快速回复框，关闭则改为打开回复弹窗"
     },
     "notifications": {
       "title": "通知",
@@ -2551,5 +2558,11 @@
     "adminEnable": "允许用户使用通知 Webhook",
     "origins": "允许的私网来源（每行一个）",
     "originsHelp": "输入包含协议、主机和端口的完整来源，不包含路径。公网端点必须使用 HTTPS。允许的私网目标可使用 HTTP，但仍禁止环回、链路本地及保留地址。"
+  },
+  "quickReply": {
+    "regionLabel": "快速回复",
+    "placeholder": "撰写快速回复…",
+    "popOut": "在完整编辑器中打开",
+    "signatureIncluded": "将附带签名"
   }
 }
