@@ -194,6 +194,7 @@ describe('providerProfile — host detection', () => {
     expect(providerProfile(account(host)).secondaryOverPool).toBe(true);
     expect(providerProfile(account(host)).bodyIndex).toBe(true);
     expect(providerProfile(account(host)).prefetchNewBodiesLimit).toBe(5);
+    expect(providerProfile(account(host)).maxSessions).toBe(6);
   });
 
   it.each([
@@ -4030,9 +4031,12 @@ describe('Gmail label memberships (#418)', () => {
     fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
     isRead: true, flags: ['\\Seen'], parsedHeaders: {} });
   function clientFor(folder) {
-    return Object.assign(new EventEmitter(), {
+    // 'close' fires once, as imapflow's does: it releases the Gmail session slot (maxSessions).
+    let closed = false;
+    const shut = () => { if (!closed) { closed = true; client.emit('close'); } };
+    const client = Object.assign(new EventEmitter(), {
       mailbox: { exists: serverUids.length, uidValidity: 1 },
-      connect: vi.fn().mockResolvedValue(), close: vi.fn(), logout: vi.fn().mockResolvedValue(),
+      connect: vi.fn().mockResolvedValue(), close: vi.fn(shut), logout: vi.fn(async () => shut()),
       noop: vi.fn(async () => true),
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       search: vi.fn(async () => serverUids),
@@ -4043,6 +4047,7 @@ describe('Gmail label memberships (#418)', () => {
         for (const uid of uids) yield { uid, folder, flags: new Set(['\\Seen']) };
       }),
     });
+    return client;
   }
   beforeEach(() => {
     vi.useFakeTimers();

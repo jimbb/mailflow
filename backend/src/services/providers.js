@@ -57,6 +57,9 @@ export const PROVIDERS = {
     // status cycle and staleness probe overlapped with the background syncs enough to be
     // refused 98 times in 48h, and the user's other mail clients were refused with it. So: a
     // pool of two, and folder status and the staleness probe reuse the pooled session (#805).
+    // Fork: also cap the mailbox at six sessions (IDLE, two pooled, three for background jobs:
+    // integrity and flag range syncs, backfill), so those fresh logins cannot pile up either.
+    maxSessions: 6,
     poolSize: 2,
     secondaryOverPool: true,
   },
