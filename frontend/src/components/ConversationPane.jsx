@@ -536,6 +536,8 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
           mode={quickReplyTarget?.token ? quickReplyTarget.replyAll : (replyDefault === 'replyAll')}
           focusToken={quickReplyTarget?.token || 0}
           isMobile={isMobile}
+          // The quick reply is plain text, so the composer's rich-text condition does not apply.
+          aiEnabled={aiReplyAvailable(aiStatus, false)}
         />
       )}
     </div>

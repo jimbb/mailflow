@@ -234,6 +234,17 @@ describe('buildReplyPrompt', () => {
     assert.equal(partial, null, 'all of it went');
   });
 
+  test("sends the user's draft with the instruction, outside the conversation", () => {
+    const { messages } = buildReplyPrompt({ conversation, instruction: 'make it warmer', draft: '  ok approved, ship friday  ' });
+    assert.equal(messages.length, 3);
+    assert.equal(messages[2].content, 'Instruction for the reply: make it warmer\n\nMy draft of the reply so far:\nok approved, ship friday');
+    assert.doesNotMatch(messages[1].content, /ship friday/);
+    assert.match(messages[0].content, /own draft of the reply: build the reply from it/);
+    const noInstruction = buildReplyPrompt({ conversation, draft: 'ok approved' }).messages[2].content;
+    assert.match(noInstruction, /^Instruction for the reply: Turn my draft into a complete, well-written reply\./);
+    assert.doesNotMatch(buildReplyPrompt({ conversation }).messages[0].content, /own draft/, 'no draft, no draft rule');
+  });
+
   test('draws a new token for each request, and tells the model that only lines carrying it are markers', () => {
     const [first, second] = [buildReplyPrompt({ conversation }), buildReplyPrompt({ conversation })];
     const token = tokenOf(first.messages[1].content);

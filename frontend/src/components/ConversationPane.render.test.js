@@ -1763,6 +1763,69 @@ describe('inline quick reply', () => {
     assert.equal(useStore.getState().composeData?.inReplyTo, '<q1@x>');
   });
 
+  test('drafts the reply with AI from the thread, the instruction and the typed text, and Undo puts the text back', async (t) => {
+    const saved = useStore.getState();
+    const realFetch = globalThis.fetch;
+    const chats = [];
+    globalThis.fetch = async (url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/mail/thread?')) return { ok: true, status: 200, json: async () => ({ messages: QUICK_THREAD }) };
+      if (u.includes('/ai/status')) return { ok: true, status: 200, json: async () => ({ enabled: true, features: { summarize: true, compose: true } }) };
+      if (u.endsWith('/ai/chat')) {
+        chats.push(JSON.parse(opts.body));
+        const delta = (content) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+        return new Response(`${delta('Hi Dave,\n\n')}${delta('Approved, shipping Friday.')}data: [DONE]\n\n`, { status: 200 });
+      }
+      return realFetch(url, opts);
+    };
+    t.after(async () => {
+      globalThis.fetch = realFetch;
+      await React.act(async () => {
+        useStore.setState({ accounts: saved.accounts, folders: saved.folders, inlineQuickReply: saved.inlineQuickReply, user: saved.user });
+        root.render(React.createElement('div'));
+      });
+    });
+
+    await React.act(async () => {
+      useStore.setState({
+        user: { id: 'u1' },
+        accounts: [{ id: 'acct-qr', email_address: 'me@example.com', sender_name: 'Me' }],
+        folders: { 'acct-qr': [{ path: 'INBOX' }, { path: 'Sent', specialUse: '\\Sent' }] },
+        inlineQuickReply: true,
+        replyDefault: 'reply',
+        plaintextEmail: true,
+      });
+      root.render(React.createElement(ConversationPane, { key: 'qr-ai', threadId: '<q1@x>', folder: 'INBOX', accountId: 'acct-qr' }));
+    });
+    await wait(50);
+
+    const qr = () => document.querySelector('[data-inline-quick-reply]');
+    const textarea = () => qr().querySelector('textarea');
+    await setTextarea(textarea(), 'ok approved, ship friday');
+    await click(qr().querySelector('button[aria-label="compose.toolbar.aiReply"]'));
+    const input = qr().querySelector('input[aria-label="compose.toolbar.aiReplyInstruction"]');
+    assert.ok(input, 'the AI button opens the instruction field, also for a plain-text user');
+    const setInput = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+    await React.act(async () => {
+      setInput.call(input, 'thank him too');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    await click([...qr().querySelectorAll('button')].find(b => b.textContent === 'compose.toolbar.aiReplyGenerate'));
+    await wait(50);
+
+    assert.equal(chats.length, 1);
+    assert.equal(chats[0].purpose, 'reply');
+    const [, material, instruction] = chats[0].messages;
+    assert.match(material.content, /body of qm1[\s\S]*body of qm2/, 'the thread up to the message answered is read');
+    assert.equal(instruction.content, 'Instruction for the reply: thank him too\n\nMy draft of the reply so far:\nok approved, ship friday');
+    assert.equal(textarea().value, 'Hi Dave,\n\nApproved, shipping Friday.', 'the draft lands in the box to read and send');
+    const send = [...qr().querySelectorAll('button')].find(b => b.textContent === 'compose.send');
+    assert.equal(send.disabled, false);
+
+    await click([...qr().querySelectorAll('button')].find(b => b.textContent === 'common.undo'));
+    assert.equal(textarea().value, 'ok approved, ship friday', 'Undo restores what was typed');
+  });
+
   test('does not render quick reply on a draft-only thread', async (t) => {
     const saved = useStore.getState();
     const realFetch = globalThis.fetch;

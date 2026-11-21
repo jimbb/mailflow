@@ -8,6 +8,8 @@ import { resolveSignatureEnabled } from '../utils/composeSignature.js';
 import { autoListsOf, openAutoRecipients } from '../utils/autoRecipients.js';
 import { modCompactLabel } from '../utils/defaultShortcuts.js';
 import { openSentMessage } from '../utils/openSentMessage.js';
+import { buildReplyPrompt, loadReplyConversation, MAX_DRAFT_CHARS } from '../utils/aiReply.js';
+import { AiReplyIcon } from './MessageActions.jsx';
 import {
   UNDO_SEND_SECONDS,
   undoWindowMs,
@@ -31,6 +33,14 @@ function shortAddressLabel(list = []) {
     .join(', ');
 }
 
+function resizeTextarea(el) {
+  if (!el || !el.style) return;
+  el.style.height = 'auto';
+  if (el.scrollHeight > 0) {
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 52), 180)}px`;
+  }
+}
+
 function scheduleUnrefTimer(fn, ms, trackerRef) {
   const handle = setTimeout(() => {
     trackerRef.current?.delete(handle);
@@ -47,6 +57,7 @@ export default function InlineQuickReply({
   focusToken = 0,
   isMobile = false,
   conversationKey: conversationKeyProp = '',
+  aiEnabled = false,
 }) {
   const { t } = useTranslation();
   const accounts = useStore(s => s.accounts);
@@ -62,8 +73,15 @@ export default function InlineQuickReply({
   const [sending, setSending] = useState(false);
   const [poppingOut, setPoppingOut] = useState(false);
   const [error, setError] = useState('');
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiInstruction, setAiInstruction] = useState('');
+  // { status: 'reading' | 'generating' | 'done', before, partial }: before is the text the AI
+  // replaced, which Stop and Undo put back.
+  const [ai, setAi] = useState(null);
 
   const sendingRef = useRef(false);
+  const aiAbortRef = useRef(null);
+  const aiConversationRef = useRef(null);
   const textareaRef = useRef(null);
   const idempotencyKeyRef = useRef(null);
   const refreshTimersRef = useRef(new Set());
@@ -82,6 +100,7 @@ export default function InlineQuickReply({
     const timers = refreshTimersRef.current;
     return () => {
       mountedRef.current = false;
+      aiAbortRef.current?.abort();
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
     };
@@ -93,6 +112,9 @@ export default function InlineQuickReply({
     setError('');
     textareaRef.current?.focus();
   }, [focusToken, mode]);
+
+  // The AI writes into the box as it streams, so it is sized from the text, not from keystrokes.
+  useEffect(() => { resizeTextarea(textareaRef.current); }, [draftText]);
 
   if (!targetMessage) return null;
 
@@ -118,15 +140,83 @@ export default function InlineQuickReply({
   const fromEmail = replyAlias?.email || myAccount?.email_address || '';
 
   const loadMessageBody = id => Promise.resolve(bodyCache.get(id) || api.getMessageBody(id));
-  const canSend = !sending && Boolean(draftText.trim()) && finalTo.length > 0 && Boolean(meta.accountId);
+  const aiBusy = ai?.status === 'reading' || ai?.status === 'generating';
+  const canSend = !sending && !aiBusy && Boolean(draftText.trim()) && finalTo.length > 0 && Boolean(meta.accountId);
   const ccBccTitle = [...finalCc, ...finalBcc].join(', ');
 
-  const resizeTextarea = (el) => {
-    if (!el || !el.style) return;
-    el.style.height = 'auto';
-    if (el.scrollHeight > 0) {
-      el.style.height = `${Math.min(Math.max(el.scrollHeight, 52), 180)}px`;
+  // Drafts the reply from the conversation, the instruction and what is already in the box,
+  // streaming into the box for the user to read, edit and send. Same prompt as Reply with AI.
+  const handleAiDraft = async () => {
+    if (aiBusy || sendingRef.current) return;
+    const before = draftText;
+    if (before.trim().length > MAX_DRAFT_CHARS) {
+      const fmt = new Intl.NumberFormat();
+      setError(t('compose.toolbar.aiError', { message: t('compose.toolbar.aiTooLong', { count: fmt.format(before.trim().length), max: fmt.format(MAX_DRAFT_CHARS) }) }));
+      return;
     }
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    const target = targetMessage;
+    setError('');
+    setAi({ status: 'reading', before, partial: null });
+    try {
+      let conversation = aiConversationRef.current?.id === target.id ? aiConversationRef.current.value : null;
+      if (!conversation) {
+        const body = await loadMessageBody(target.id).catch(() => null);
+        conversation = await loadReplyConversation({
+          threadId: meta.threadId,
+          inReplyTo: meta.inReplyTo,
+          accountId: meta.accountId,
+          quotedBody: buildQuotedReply(target, body).quotedBody,
+          originalFrom: meta.originalFrom,
+          subject: meta.subject,
+          accounts,
+        }, { getThread: api.getThread, getMessageBody: loadMessageBody, resolveMessage: api.resolveMessage });
+        // Kept only when something was found, so a failed load is tried again next time.
+        if (conversation.messages.length) aiConversationRef.current = { id: target.id, value: conversation };
+      }
+      if (controller.signal.aborted) return;
+      const { messages, partial } = buildReplyPrompt({
+        conversation: conversation.messages,
+        leftOut: conversation.leftOut,
+        instruction: aiInstruction,
+        draft: before,
+        subject: meta.subject,
+        senderName: replyAlias?.name || myAccount?.sender_name || myAccount?.name,
+        hasSignature,
+      });
+      setAi({ status: 'generating', before, partial });
+      const text = await api.ai.chat(messages, {
+        purpose: 'reply',
+        signal: controller.signal,
+        onDelta: (sofar) => { if (!controller.signal.aborted) setDraftText(sofar); },
+      });
+      if (controller.signal.aborted) return;
+      idempotencyKeyRef.current = null;
+      setDraftText(text.trim() || before);
+      setAi(text.trim() ? { status: 'done', before, partial } : null);
+      textareaRef.current?.focus();
+    } catch (err) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
+      setDraftText(before);
+      setAi(null);
+      const reason = err?.code === 'ai_user_disabled' ? t('compose.toolbar.aiNotAllowed')
+        : err?.code === 'ai_feature_disabled'
+          ? t(err.feature === 'summarize' ? 'message.aiFeatureOff' : 'compose.toolbar.aiFeatureOff')
+          : err?.message;
+      setError(t('compose.toolbar.aiError', { message: reason }));
+    } finally {
+      if (aiAbortRef.current === controller) aiAbortRef.current = null;
+    }
+  };
+
+  const restoreBeforeAi = () => {
+    aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    if (ai) setDraftText(ai.before);
+    setAi(null);
+    idempotencyKeyRef.current = null;
   };
 
   const triggerThreadRefresh = (threadId, accountId, ownerId) => {
@@ -152,7 +242,7 @@ export default function InlineQuickReply({
   };
 
   const handlePopOut = async () => {
-    if (sendingRef.current || poppingOut) return;
+    if (sendingRef.current || poppingOut || aiBusy) return;
     const capturedKey = activeKeyRef.current;
     const capturedDraft = draftText;
     const capturedReplyAll = replyAll;
@@ -232,7 +322,7 @@ export default function InlineQuickReply({
         if (activeKeyRef.current === capturedKey) {
           setDraftText('');
           setError('');
-          if (textareaRef.current?.style) textareaRef.current.style.height = 'auto';
+          setAi(null);
         }
       }
 
@@ -441,10 +531,29 @@ export default function InlineQuickReply({
           </div>
         )}
 
+        {aiEnabled && (
+          <button
+            type="button"
+            onClick={() => setAiOpen(open => !open)}
+            aria-pressed={aiOpen}
+            title={t('compose.toolbar.aiReply')}
+            aria-label={t('compose.toolbar.aiReply')}
+            style={{
+              ...modeBtnStyle(aiOpen),
+              padding: isMobile ? '6px 8px' : '3px 6px',
+              display: 'flex',
+              alignItems: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <AiReplyIcon />
+          </button>
+        )}
+
         <button
           type="button"
           onClick={handlePopOut}
-          disabled={sending || poppingOut}
+          disabled={sending || poppingOut || aiBusy}
           title={t('quickReply.popOut')}
           aria-label={t('quickReply.popOut')}
           style={{
@@ -482,17 +591,63 @@ export default function InlineQuickReply({
         </div>
       )}
 
+      {aiEnabled && aiOpen && (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            type="text"
+            autoFocus
+            value={aiInstruction}
+            maxLength={1000}
+            disabled={aiBusy || sending}
+            placeholder={t('compose.toolbar.aiReplyPlaceholder')}
+            aria-label={t('compose.toolbar.aiReplyInstruction')}
+            onChange={(e) => setAiInstruction(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.nativeEvent?.isComposing) {
+                e.preventDefault();
+                void handleAiDraft();
+              } else if (e.key === 'Escape') {
+                e.stopPropagation();
+                setAiOpen(false);
+                textareaRef.current?.focus();
+              }
+            }}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: 'var(--bg-primary)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '6px 10px',
+              font: 'inherit',
+              fontSize: 12,
+              outline: 'none',
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleAiDraft}
+            disabled={aiBusy || sending}
+            style={{ ...modeBtnStyle(true), padding: isMobile ? '6px 12px' : '4px 10px', cursor: aiBusy || sending ? 'default' : 'pointer' }}
+          >
+            {t('compose.toolbar.aiReplyGenerate')}
+          </button>
+        </div>
+      )}
+
       <textarea
         ref={textareaRef}
         rows={2}
         value={draftText}
         disabled={sending}
+        readOnly={aiBusy}
         placeholder={t('quickReply.placeholder')}
         aria-label={t('quickReply.placeholder')}
         onChange={(e) => {
           idempotencyKeyRef.current = null;
           setDraftText(e.target.value);
-          resizeTextarea(e.target);
+          if (ai?.status === 'done') setAi(null);
         }}
         onKeyDown={handleKeyDown}
         style={{
@@ -515,9 +670,27 @@ export default function InlineQuickReply({
       />
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {hasSignature ? t('quickReply.signatureIncluded') : ''}
-        </div>
+        {ai ? (
+          <div aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, fontSize: 11, color: 'var(--text-tertiary)' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {ai.status === 'reading' ? t('compose.toolbar.aiReplyReading')
+                : ai.status === 'generating' ? t('compose.toolbar.aiGenerating')
+                  : ai.partial ? (ai.partial.tooLong ? t('compose.toolbar.aiReplyPartial') : t('compose.toolbar.aiReplyLeftOut', { count: ai.partial.read }))
+                    : ''}
+            </span>
+            <button
+              type="button"
+              onClick={restoreBeforeAi}
+              style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--accent)', fontSize: 11, cursor: 'pointer', flexShrink: 0 }}
+            >
+              {aiBusy ? t('common.cancel') : t('common.undo')}
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {hasSignature ? t('quickReply.signatureIncluded') : ''}
+          </div>
+        )}
         <button
           type="button"
           onClick={handleSend}
