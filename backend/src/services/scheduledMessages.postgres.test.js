@@ -87,8 +87,9 @@ describe.skipIf(!ADMIN_URL)('scheduled messages schema on PostgreSQL (#543)', ()
     await runMigrations();
 
     for (const name of [freshDb, upgradedDb]) {
-      const { rows } = await pools[name].query("SELECT version FROM schema_migrations WHERE version LIKE '0071_%'");
-      expect(rows).toEqual([{ version: '0071_scheduled_messages' }]);
+      // This fork has a second 0071 (body cache); versions are whole file names, so both apply.
+      const { rows } = await pools[name].query("SELECT version FROM schema_migrations WHERE version LIKE '0071_%' ORDER BY version");
+      expect(rows).toEqual([{ version: '0071_message_body_attempted_at' }, { version: '0071_scheduled_messages' }]);
     }
     const fresh = await schemaOf(pools[freshDb]);
     expect(await schemaOf(pools[upgradedDb])).toEqual(fresh);

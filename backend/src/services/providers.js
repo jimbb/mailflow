@@ -31,6 +31,16 @@ export const PROVIDERS = {
     // Backfills 30k+ messages in ~2 min instead of 12+ hours.
     batchSize: 500, batchDelay: 2000, errorDelay: 30000, batchesPerConn: 10,
     fetchBody: false,
+    // A throttled Gmail account answers every command after ~10s ("OK Success [THROTTLED]"),
+    // for hours. NAMESPACE, COMPRESS and ENABLE after the login then took ~32s, past the 30s
+    // connect deadline, so the account could never connect and its mail stopped. Without
+    // COMPRESS the handshake takes ~21s and the account still syncs, slowly.
+    disableCompression: true,
+    // New arrivals use the separate body-prefetch path so live sync stays envelope-only
+    // while the newest mail is still cached immediately.
+    bodyIndex: true,
+    prefetchNewBodies: true,
+    prefetchNewBodiesLimit: 5,
     pushesFlags: false,
     snippetIndex: false,
     speculativeFetch: false,

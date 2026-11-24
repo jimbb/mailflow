@@ -192,6 +192,8 @@ describe('providerProfile — host detection', () => {
     // Gmail's 15-session limit: a pool of two, and folder status and the staleness probe ride it.
     expect(providerProfile(account(host)).poolSize).toBe(2);
     expect(providerProfile(account(host)).secondaryOverPool).toBe(true);
+    expect(providerProfile(account(host)).bodyIndex).toBe(true);
+    expect(providerProfile(account(host)).prefetchNewBodiesLimit).toBe(5);
   });
 
   it.each([
@@ -391,6 +393,20 @@ describe('makeClientCfg — broken-IMAP4rev2 opt-out (#472)', () => {
     for (const host of ['imap.example.com', 'imap.gmail.com', 'imap.purelymail.com']) {
       const acct = { ...baseAccount, imap_host: host };
       expect(makeClientCfg(acct, resolved, { enableIdle: false }).disableIMAP4rev2).toBeUndefined();
+    }
+  });
+});
+
+describe('makeClientCfg — no COMPRESS for Gmail', () => {
+  // A throttled Gmail account answers each command after ~10s; with COMPRESS the handshake
+  // outlasted the 30s connect deadline and the account never connected again.
+  it('skips COMPRESS on every Gmail connection, and only there', () => {
+    const gmail = { ...baseAccount, imap_host: 'imap.gmail.com' };
+    expect(makeClientCfg(gmail, resolved, { enableIdle: true }).disableCompression).toBe(true);
+    expect(makeClientCfg(gmail, resolved, { enableIdle: false }).disableCompression).toBe(true);
+    for (const host of ['imap.example.com', 'outlook.office365.com', 'imap.purelymail.com', 'imap.strato.de']) {
+      const acct = { ...baseAccount, imap_host: host };
+      expect(makeClientCfg(acct, resolved, { enableIdle: false }).disableCompression).toBeUndefined();
     }
   });
 });

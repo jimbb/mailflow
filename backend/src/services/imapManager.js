@@ -433,6 +433,13 @@ export function planIntegrityFlagScan({ condstore, storedModseq, serverModseq, e
 // Body parts that cover ~99% of real-world email structures (used for full body caching)
 const BODY_PREFETCH_PARTS = ['1', '1.1', '1.2', '2', '2.1', '2.2', '1.1.1', '1.2.1'];
 
+// Rows the historical body indexer still has to fill. Only recent mail: new arrivals are cached
+// as they come in, and the whole history (half a million Gmail messages, several GB) does not
+// fit the Postgres disk on a small host. Older bodies are fetched when opened, as before.
+// ponytail: fixed 90-day window; widen it once Postgres sits on a disk with room for every body.
+export const BODY_INDEX_PENDING =
+  "body_html IS NULL AND body_text IS NULL AND body_attempted_at IS NULL AND date > NOW() - INTERVAL '90 days'";
+
 // The part numbers a message's BODYSTRUCTURE lists. imapflow numbers a multipart's children
 // "1", "2", "1.1" and so on; a single-part message carries no number in the tree, and its
 // body is part 1.
@@ -1525,7 +1532,8 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid,
+      body_attempted_at
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1536,7 +1544,8 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses, plugin_annotations, provider_msgid,
+      body_attempted_at
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -2065,6 +2074,7 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
   // UID SEARCH ALL with an empty ESEARCH once IMAP4rev2 is enabled). Profile-driven so
   // every connection kind — persistent, pool, backfill, probe — behaves identically.
   if (providerProfile(account).disableIMAP4rev2) cfg.disableIMAP4rev2 = true;
+  if (providerProfile(account).disableCompression) cfg.disableCompression = true;
   // Auto-IDLE: ImapFlow re-enters IDLE automatically between commands so the
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
@@ -2976,28 +2986,31 @@ export class ImapManager {
       }
     }, 90000); // 90 seconds — fast enough to catch startup failures, slow enough not to spam
 
-    // Snippet-backfill scheduler: periodically resume snippet indexing for connected
-    // accounts that still have a backlog, so a large account (>10k missing snippets)
-    // keeps draining without waiting for a reconnect/restart. startSnippetIndexer caps
-    // each run and self-guards against concurrent runs, so this is a safe nudge.
+    // Background content-index scheduler: periodically resume snippet/body indexing for
+    // connected accounts that still have a backlog. The worker caps each run and self-guards
+    // against concurrent runs, so this is a safe nudge that cannot block live sync.
     this._snippetSchedulerTimer = setInterval(async () => {
       try {
         for (const accountId of this.connections.keys()) {
           if (this.snippetIndexerRunning.has(accountId)) continue;
+          if (this.backfillAllRunning.has(accountId)) continue;
+          const acct = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+          if (!acct.rows.length) continue;
+          const profile = providerProfile(acct.rows[0]);
           const backlog = await query(
-            "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL LIMIT 1",
+            profile.bodyIndex
+              ? `SELECT 1 FROM messages WHERE account_id = $1 AND ${BODY_INDEX_PENDING} LIMIT 1`
+              : "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL LIMIT 1",
             [accountId]
           );
           if (!backlog.rows.length) continue;
-          const acct = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-          if (!acct.rows.length) continue;
           // Host-level circuit breaker: skip if this account's provider host is backing off
           // (another account on it was just refused). startSnippetIndexer re-checks; this only
           // avoids the run setup. Keyed by imap_host, so it needs the fetched account row.
           const bo = this.snippetBackoff.get((acct.rows[0].imap_host || '').toLowerCase());
           if (bo && Date.now() < bo.until) continue;
           this.startSnippetIndexer(acct.rows[0]).catch(err =>
-            console.warn(`Scheduled snippet indexer failed for account ${accountId}:`, err.message)
+            console.warn(`Scheduled content indexer failed for account ${accountId}:`, err.message)
           );
         }
       } catch (err) {
@@ -4993,6 +5006,7 @@ export class ImapManager {
         const maxKnownUid = Number(max_uid);
 
         let newMessages = [];
+        const newArrivalMessages = [];
         let insertedCount = 0;
         let broadcastedNewMessages = false;
 
@@ -5162,6 +5176,9 @@ export class ImapManager {
               if (carried.spam_analyzed_at == null) this.maybeClassifyNewMessage(account, result.rows[0].id, parsed);
             } else if (result.rows[0]?.is_new) {
               insertedCount++;
+              if (folder === 'INBOX') {
+                newArrivalMessages.push({ ...parsed, id: result.rows[0].id, accountId: account.id, folder });
+              }
               // Inbox-ingest candidate: any newly-inserted INBOX row, read OR unread (read state
               // is not a gate here — the plugin decides). The unread-only push below still drives
               // notifications. Gated on wantsInboxIngest so a mailbox with no ingest plugin builds
@@ -5454,9 +5471,9 @@ export class ImapManager {
           // Only do this for small batches (periodic new mail, not initial bulk sync),
           // and let provider profiles cap or disable the work when BODY[] is sensitive.
           const prefetchProfile = providerProfile(account);
-          if (newMessages.length <= 5 && prefetchProfile.prefetchNewBodies !== false) {
-            const warmLimit = Math.max(1, Number(prefetchProfile.prefetchNewBodiesLimit) || newMessages.length);
-            const msgsToCache = newMessages.slice(-warmLimit);
+          if (newArrivalMessages.length > 0 && prefetchProfile.prefetchNewBodies !== false) {
+            const warmLimit = Math.max(1, Number(prefetchProfile.prefetchNewBodiesLimit) || newArrivalMessages.length);
+            const msgsToCache = newArrivalMessages.slice(-warmLimit);
             setImmediate(() => {
               this.prefetchNewMessageBodies(account, msgsToCache)
                 .catch(err => console.warn(`Body prefetch error for ${logAccount(account)}:`, err.message));
@@ -6199,14 +6216,14 @@ export class ImapManager {
     this.lastUserActivity.set(accountId, Date.now());
   }
 
-  // Background job that fetches text snippets for messages that were backfilled without
-  // body parts (the common case — backfill runs metadata-only for speed). Runs per-account
-  // after backfill completes, and also at connect time for existing accounts.
-  // Skipped for providers that throttle body fetches too aggressively to run at scale.
-  // Processes most-recent messages first so the most useful results are indexed quickly.
+  // Background job that fills snippets or full bodies for messages that were backfilled
+  // without body parts. Body indexing is separate from live sync: new mail gets the fast
+  // prefetch path, while this worker drains historical rows newest-first and resumes from
+  // body_attempted_at after restarts.
   async startSnippetIndexer(account) {
     const cfg = providerProfile(account);
-    if (!cfg.snippetIndex) return;
+    const bodyIndex = cfg.bodyIndex === true;
+    if (!cfg.snippetIndex && !bodyIndex) return;
 
     if (this.snippetIndexerRunning.has(account.id)) return;
     // Honor the HOST-level circuit breaker for every caller (scheduler, post-connect, post-sync):
@@ -6217,12 +6234,17 @@ export class ImapManager {
     if (backoff && Date.now() < backoff.until) return;
     this.snippetIndexerRunning.add(account.id);
 
-    // Rate limit: conservative batches so this doesn't affect normal usage.
+    // Rate limit: body fetches are more expensive than snippet-only fetches, so keep the
+    // historical body pass deliberately small. New-mail prefetch remains the priority.
     // Cap per run so a large account doesn't occupy an IMAP connection indefinitely;
-    // the indexer resumes from where it left off on the next server startup.
-    const batchSize = 50;
-    const batchDelay = Math.max(cfg.batchDelay, 2000); // at least 2s between batches
-    const MAX_BATCHES_PER_RUN = 200; // 10,000 messages max per session
+    // the indexer resumes from where it left off on the next scheduler tick.
+    const batchSize = bodyIndex ? 20 : 50;
+    const batchDelay = bodyIndex ? Math.max(cfg.batchDelay, 5000) : Math.max(cfg.batchDelay, 2000);
+    const MAX_BATCHES_PER_RUN = bodyIndex ? 100 : 200;
+    const needsContent = bodyIndex
+      ? BODY_INDEX_PENDING
+      : "(snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL";
+    const label = bodyIndex ? 'Body indexer' : 'Snippet indexer';
 
     let siClient = null;
     // Hoisted so the finally can distinguish a productive run from one that failed
@@ -6234,13 +6256,13 @@ export class ImapManager {
     try {
       // Check if there's anything to index before opening a connection
       const countResult = await query(
-        "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL",
+        `SELECT count(*) FROM messages WHERE account_id = $1 AND ${needsContent}`,
         [account.id]
       );
       const totalMissing = parseInt(countResult.rows[0].count);
       if (totalMissing === 0) return;
 
-      logger.debug(`Snippet indexer: ${logAccount(account)} has ${totalMissing} messages without snippets`);
+      logger.debug(`${label}: ${logAccount(account)} has ${totalMissing} messages to process`);
 
       // Draw from the per-host background-connection budget (shared with backfill) so every
       // account on one provider host shares a bounded number of background connections instead
@@ -6255,7 +6277,7 @@ export class ImapManager {
         if (!row) throw new Error('Account deleted');
         const fresh = await ensureFreshToken(row);
         const { resolved, policy } = await resolveAccountHost(fresh);
-        siClient = await connectImapClient(fresh, resolved, { policy }, 30000, 'Snippet indexer connect');
+        siClient = await connectImapClient(fresh, resolved, { policy }, 30000, `${label} connect`);
       };
 
       await openClient();
@@ -6263,7 +6285,7 @@ export class ImapManager {
       // Get distinct folders that have unindexed messages
       const foldersResult = await query(
         `SELECT folder, count(*) as cnt FROM messages
-         WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL
+         WHERE account_id = $1 AND ${needsContent}
          GROUP BY folder ORDER BY cnt DESC`,
         [account.id]
       );
@@ -6279,22 +6301,22 @@ export class ImapManager {
           // Reconnect periodically to keep the connection fresh
           if (batchCount > 0 && batchCount % 20 === 0) {
             await openClient().catch(err => {
-              console.error(`Snippet indexer reconnect failed: ${err.message}`);
+              console.error(`${label} reconnect failed: ${err.message}`);
             });
           }
 
           if (batchCount >= MAX_BATCHES_PER_RUN) {
             const remaining = await query(
-              "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL",
+              `SELECT count(*) FROM messages WHERE account_id = $1 AND ${needsContent}`,
               [account.id]
             );
-            console.log(`Snippet indexer paused for ${logAccount(account)} after ${batchCount} batches — ${remaining.rows[0].count} remaining, will resume on next startup`);
+            console.log(`${label} paused for ${logAccount(account)} after ${batchCount} batches — ${remaining.rows[0].count} remaining, will resume on the next scheduler tick`);
             return;
           }
 
           const batchResult = await query(
             `SELECT uid FROM messages
-             WHERE account_id = $1 AND folder = $2 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL
+             WHERE account_id = $1 AND folder = $2 AND ${needsContent}
              ORDER BY date DESC LIMIT $3`,
             [account.id, folder, batchSize]
           );
@@ -6307,7 +6329,29 @@ export class ImapManager {
               const refused = await fetchSnippetBatch(siClient, uids, async (msg) => {
                 try {
                   const parsed = await parseMessage(msg);
-                  if (parsed.snippet) {
+                  if (bodyIndex) {
+                    const body = extractBodyFromMsg(msg);
+                    let safeHtml = null;
+                    let bodyText = null;
+                    let attachments = attachmentsFromStructure(msg);
+                    if (body && !body.deferred) {
+                      safeHtml = body.html ? sanitizeEmail(body.html) : null;
+                      bodyText = body.text;
+                      attachments = body.attachments;
+                    }
+                    const snippet = snippetFromBody(bodyText, safeHtml);
+                    await query(
+                      `UPDATE messages
+                       SET body_html = COALESCE(messages.body_html, $1),
+                           body_text = COALESCE(messages.body_text, $2),
+                           attachments = CASE WHEN $3::jsonb <> '[]'::jsonb THEN $3::jsonb ELSE messages.attachments END,
+                           snippet = CASE WHEN $4 <> '' THEN $4 ELSE messages.snippet END
+                       WHERE account_id = $5 AND uid = $6 AND folder = $7
+                         AND body_attempted_at IS NULL`,
+                      [sanitizeStr(safeHtml), sanitizeStr(bodyText), JSON.stringify(attachments || []),
+                        sanitizeStr(snippet), account.id, msg.uid, folder]
+                    );
+                  } else if (parsed.snippet) {
                     await query(
                       `UPDATE messages SET snippet = $1
                        WHERE account_id = $2 AND uid = $3 AND folder = $4
@@ -6324,21 +6368,29 @@ export class ImapManager {
             } finally {
               lock.release();
             }
-            // Mark every message in this batch that still has no snippet as attempted, so a
-            // fetched-but-empty (or server-missing) message is never re-selected — this is what
-            // guarantees the backlog drains by one batch per iteration instead of looping on the
-            // same un-snippetable rows forever (#379).
-            await query(
-              `UPDATE messages SET snippet_attempted_at = NOW()
-               WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])
-                 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL`,
-              [account.id, folder, uids]
-            );
+            // Mark every successfully fetched message in this batch as attempted. This is the
+            // durable checkpoint that drains empty/unparseable bodies without retrying them
+            // forever, while a failed IMAP batch remains unmarked and can retry later.
+            if (bodyIndex) {
+              await query(
+                `UPDATE messages SET body_attempted_at = NOW()
+                 WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])
+                   AND body_attempted_at IS NULL`,
+                [account.id, folder, uids]
+              );
+            } else {
+              await query(
+                `UPDATE messages SET snippet_attempted_at = NOW()
+                 WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])
+                   AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL`,
+                [account.id, folder, uids]
+              );
+            }
             batchCount++;
             consecutiveErrors = 0;
           } catch (err) {
             consecutiveErrors++;
-            console.error(`Snippet indexer batch error ${logAccount(account)}/${folder}:`, extractImapError(err));
+            console.error(`${label} batch error ${logAccount(account)}/${folder}:`, extractImapError(err));
             // Connection refusal = the provider is at its per-host/per-IP connection limit
             // (iCloud especially, or many accounts on one server, right after a startup backfill
             // burst). Reopening a fresh connection to retry would only pile on more pressure and
@@ -6350,13 +6402,13 @@ export class ImapManager {
             if (isConnectionRefusal(extractImapError(err))) {
               failed = true;
               refused = true;
-              console.log(`Snippet indexer backing off ${logAccount(account)} — provider refusing connections (at limit)`);
+              console.log(`${label} backing off ${logAccount(account)} — provider refusing connections (at limit)`);
               return;
             }
             await new Promise(r => setTimeout(r, cfg.errorDelay));
             if (consecutiveErrors >= 3) {
               failed = true;
-              console.log(`Snippet indexer aborting for ${logAccount(account)} after ${consecutiveErrors} consecutive errors — will resume on next startup`);
+              console.log(`${label} aborting for ${logAccount(account)} after ${consecutiveErrors} consecutive errors — will resume on the next scheduler tick`);
               return;
             }
             await openClient();
@@ -6370,7 +6422,7 @@ export class ImapManager {
         }
       }
 
-      console.log(`Snippet indexer complete for ${logAccount(account)} (${batchCount} batches)`);
+      console.log(`${label} complete for ${logAccount(account)} (${batchCount} batches)`);
     } catch (err) {
       failed = true;
       console.error(`Snippet indexer error ${logAccount(account)}:`, extractImapError(err));
@@ -6392,7 +6444,7 @@ export class ImapManager {
         const failures = (this.snippetBackoff.get(host)?.failures || 0) + 1;
         const delay = Math.min(SNIPPET_BACKOFF_BASE_MS * 2 ** (failures - 1), SNIPPET_BACKOFF_MAX_MS);
         this.snippetBackoff.set(host, { failures, until: Date.now() + delay });
-        console.log(`Snippet indexer backing off ${logAccount(account)} for ${Math.round(delay / 60000)}m (failure #${failures})`);
+        console.log(`${label} backing off ${logAccount(account)} for ${Math.round(delay / 60000)}m (failure #${failures})`);
       } else {
         this.snippetBackoff.delete(host);
       }
