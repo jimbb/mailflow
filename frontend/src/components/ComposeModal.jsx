@@ -954,10 +954,13 @@ export default function ComposeModal() {
       : (htmlMode ? stripTags(htmlSource) : (editor?.getText({ blockSeparator: '\n' }) ?? ''));
 
     const toStr = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])].join(', ');
+    // Write draft replaces the body on Apply, so what the user already typed (notes or a start)
+    // goes to the model as the content to write up, not thrown away for one from the subject.
+    const notes = currentText.trim();
     const PROMPTS = {
       draft: {
-        system: 'You are a professional email writing assistant. Write a complete, well-structured email based on the provided subject and recipient context. Return only the email body text. Use plain text with no markdown or HTML. Use double newlines between paragraphs.',
-        user: `Subject: ${subject || '(none)'}\nTo: ${toStr || '(none)'}\n\nWrite a complete professional email.`,
+        system: 'You are a professional email writing assistant. Write a complete, well-structured email based on the provided subject and recipient context, and on the notes or partial draft the user has written, if any: keep every point, fact, name, date and number from them and do not add claims they do not make. Return only the email body text. Use plain text with no markdown or HTML. Use double newlines between paragraphs.',
+        user: `Subject: ${subject || '(none)'}\nTo: ${toStr || '(none)'}\n\n${notes ? `What I have written so far:\n${notes}\n\nWrite a complete professional email from it.` : 'Write a complete professional email.'}`,
       },
       improve: {
         system: 'You are a professional email writing assistant. Improve the following email for clarity, tone, and professionalism. Return only the improved email body text. Use plain text with no markdown or HTML.',

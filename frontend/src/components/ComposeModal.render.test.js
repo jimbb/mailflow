@@ -1435,6 +1435,20 @@ describe('Reply with AI', () => {
       assert.equal(purposes.at(-1), 'compose');
     });
   });
+
+  // Apply replaces the body, so notes typed before Write draft must reach the model.
+  describe('in a new message with notes in the body', () => {
+    before(() => mount({ accountId: 'acct', to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Quote', body: '<p>200 units, need it by Friday</p><p>budget 5k</p>' }));
+    after(() => unmount());
+
+    test('Write draft writes from what the body already says', async () => {
+      answer = 'Hi Bob,\n\nCould you quote 200 units by Friday?';
+      await openAiMenu();
+      await press(button('compose.toolbar.aiWriteDraft'));
+      await React.act(async () => {});
+      assert.match(chats.at(-1)[1].content, /200 units, need it by Friday\nbudget 5k/);
+    });
+  });
 });
 
 describe('pasting text copied from an email', () => {
